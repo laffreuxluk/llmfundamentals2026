@@ -1,5 +1,6 @@
 import os
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, replace
 from typing import Literal
 
 import anthropic
@@ -13,6 +14,24 @@ Provider = Literal["anthropic", "openai"]
 OPENROUTER_ANTHROPIC_URL = "https://openrouter.ai/api"
 OPENROUTER_OPENAI_URL = "https://openrouter.ai/api/v1"
 
+# USD per 1M tokens (input, output). Anthropic: platform.claude.com/docs/en/about-claude/pricing
+# OpenAI prices are those listed on OpenRouter for each model.
+PRICES: dict[str, tuple[float, float]] = {
+    "anthropic/claude-haiku-4.5": (1.00, 5.00),
+    "anthropic/claude-sonnet-5.5": (2.00, 10.00),
+    "openai/gpt-4.1-mini": (0.40, 1.60),
+    "openai/gpt-4.1-nano": (0.10, 0.40),
+}
+
+
+def compute_cost(model: str, input_tokens: int, output_tokens: int) -> float | None:
+    """Cost in USD, or None when the model's price is unknown."""
+    if model not in PRICES:
+        return None
+    price_in, price_out = PRICES[model]
+    return (input_tokens * price_in + output_tokens * price_out) / 1_000_000
+
+
 DEFAULT_MODELS: dict[Provider, str] = {
     "anthropic": "anthropic/claude-haiku-4.5",
     "openai": "openai/gpt-4.1-mini",
@@ -24,9 +43,9 @@ class LLMResponse:
     text: str
     input_tokens: int
     output_tokens: int
-#    cost_usd: float | None  # None when the model's price is unknown # uncomment when you're working on the cost
+    cost_usd: float | None  # None when the model's price is unknown
     stop_reason: str | None = None  # e.g. "end_turn" or "max_tokens" (Claude), "stop" or "length" (OpenAI)
- #   latency_seconds: float | None = None  # wall-clock time of ask(), including retries # uncomment when you're working on the latency
+    latency_seconds: float | None = None  # wall-clock time of ask(), including retries
 
 
 class LLMWrapper:
@@ -62,9 +81,12 @@ class LLMWrapper:
     def ask(self, prompt: str, system: str | None = None) -> LLMResponse:
         """Send a single prompt and return the text and the token usage."""
         logger.debug("Sending request to {}/{}", self.provider, self.model)
+        start = time.perf_counter()
         if self.provider == "anthropic":
-            return self._ask_anthropic(prompt, system)
-        return self._ask_openai(prompt, system)
+            response = self._ask_anthropic(prompt, system)
+        else:
+            response = self._ask_openai(prompt, system)
+        return replace(response, latency_seconds=time.perf_counter() - start)
 
     def _ask_anthropic(self, prompt: str, system: str | None) -> LLMResponse:
         kwargs = {"system": system} if system else {}
@@ -80,16 +102,29 @@ class LLMWrapper:
             text="".join(b.text for b in response.content if b.type == "text"),
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,
+            cost_usd=compute_cost(
+                self.model, response.usage.input_tokens, response.usage.output_tokens
+            ),
             stop_reason=response.stop_reason,
         )
 
     def _ask_openai(self, prompt: str, system: str | None) -> LLMResponse:
-        # TODO implement function
+        messages = [{"role": "user", "content": prompt}]
+        if system:
+            messages.insert(0, {"role": "system", "content": system})
+        response = self._openai.chat.completions.create(
+            model=self.model,
+            max_tokens=self.max_tokens,
+            messages=messages,
+        )
+        choice = response.choices[0]
+        usage = response.usage
         return LLMResponse(
-            text="",
-            input_tokens=0,
-            output_tokens=0,
-            stop_reason="",
+            text=choice.message.content or "",
+            input_tokens=usage.prompt_tokens,
+            output_tokens=usage.completion_tokens,
+            cost_usd=compute_cost(self.model, usage.prompt_tokens, usage.completion_tokens),
+            stop_reason=choice.finish_reason,
         )
 
 

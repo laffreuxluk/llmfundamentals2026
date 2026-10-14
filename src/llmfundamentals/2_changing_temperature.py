@@ -22,21 +22,29 @@ client = anthropic.Anthropic(
 )
 
 
-def ask(prompt):
+def ask(prompt, **sampling):
+    """sampling is either temperature=... or top_p=... (not both)."""
     response = client.messages.create(
         model=MODEL,
         max_tokens=MAX_TOKENS,
         messages=[{"role": "user", "content": prompt}],
-        extra_body={"temperature": 0.5},  # or {"top_p": 0.9}, not both
+        extra_body=sampling,
     )
     return response.content[0].text
 
 
 def main():
-    # TODO change temperature
-    logger.info(ask(PROMPT))
+    # Temperature: 3 runs per value, to see how much the answer varies
+    for temperature in TEMPERATURES:
+        for run in range(3):
+            logger.info(
+                "temperature={} run {}: {}", temperature, run + 1, ask(PROMPT, temperature=temperature)
+            )
 
-    # TODO change top p
+    # Top p: 3 runs per value
+    for top_p in TOP_PS:
+        for run in range(3):
+            logger.info("top_p={} run {}: {}", top_p, run + 1, ask(PROMPT, top_p=top_p))
 
 
 if __name__ == "__main__":
